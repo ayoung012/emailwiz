@@ -8,7 +8,7 @@
 
 
 # BEFORE YOU RUN THIS
-# - Have a Debian system with a static IP and all that. Pretty much any default VPS offered by a company will have all the basic stuff you need. This script might run on Ubuntu as well. Haven't tried it.
+# - Have a CentOS system with a static IP and all that. Pretty much any default VPS offered by a company will have all the basic stuff you need. This script might run on Ubuntu as well. Haven't tried it.
 # - Have a Let's Encrypt SSL certificate for $maildomain. You might need one for $domain as well, but they're free with Let's Encypt so you should have them anyway.
 # - If you've been toying around with your server settings trying to get postfix/dovecot/etc. working before running this, I recommend you `apt purge` everything first because this script is build on top of only the defaults. Clearr out /etc/postfix and /etc/dovecot yourself if needbe.
 
@@ -16,7 +16,7 @@
 # On installation of Postfix, select "Internet Site" and put in TLD (without before it mail.)
 
 echo "Installing programs..."
-apt install postfix dovecot-imapd opendkim spamassassin spamc
+yum install postfix dovecot opendkim spamassassin # TODO where/what is spamc??
 domain="$(cat /etc/mailname)"
 subdom="mail"
 maildomain="$subdom.$domain"
@@ -71,7 +71,7 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_tls_wrappermode=yes
   -o smtpd_sasl_auth_enable=yes
 spamassassin unix -     n       n       -       -       pipe
-  user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
+  flags=R user=spamd argv=/usr/bin/spamc -e /usr/sbin/sendmail -oi -f ${sender} ${recipient}" >> /etc/postfix/master.cf
 
 
 # By default, dovecot has a bunch of configs in /etc/dovecot/conf.d/
@@ -157,39 +157,46 @@ account required        pam_unix.so" >> /etc/pam.d/dovecot
 # add opendkim-tools ?
 
 # Create an OpenDKIM key and put in in the proper place with proper permissions.
+# SELinux seems to be less upset when we use the opendkim config location
 echo "Generating OpenDKIM keys..."
-mkdir -p /etc/postfix/dkim
-opendkim-genkey -D /etc/postfix/dkim/ -d $ "$domain" -s "$subdom"
-chgrp opendkim /etc/postfix/dkim/*
-chmod g+r /etc/postfix/dkim/*
+opendkim-genkey -D /etc/opendkim/keys/ -d $ "$domain" -s "$subdom"
+chown opendkim.opendkim /etc/opendkim/keys/*
 
 # Generate the OpenDKIM info:
 echo "Configuring OpenDKIM..."
-grep "$domain" >/dev/null 2>&1 /etc/postfix/dkim/keytable ||
-echo "$subdom._domainkey.$domain $domain:mail:/etc/postfix/dkim/mail.private" >> /etc/postfix/dkim/keytable
+grep "$domain" >/dev/null 2>&1 /etc/opendkim/KeyTable ||
+echo "$subdom._domainkey.$domain $domain:mail:/etc/opendkim/keys/$subdom.private" >> /etc/opendkim/KeyTable
 
-grep "$domain" >/dev/null 2>&1 /etc/postfix/dkim/signingtable ||
-echo "*@$domain $subdom._domainkey.$domain" >> /etc/postfix/dkim/signingtable
+grep "$domain" >/dev/null 2>&1 /etc/opendkim/SigningTable ||
+echo "*@$domain $subdom._domainkey.$domain" >> /etc/opendkim/SigningTable
 
-grep "127.0.0.1" >/dev/null 2>&1 /etc/postfix/dkim/trustedhosts ||
+grep "127.0.0.1" >/dev/null 2>&1 /etc/opendkim/TrustedHosts ||
 	echo "127.0.0.1
 10.1.0.0/16
-1.2.3.4/24" >> /etc/postfix/dkim/trustedhosts
+1.2.3.4/24" >> /etc/opendkim/TrustedHosts
 
 # ...and source it from opendkim.conf
-grep ^KeyTable /etc/opendkim.conf >/dev/null || echo "KeyTable file:/etc/postfix/dkim/keytable
-SigningTable refile:/etc/postfix/dkim/signingtable
-InternalHosts refile:/etc/postfix/dkim/trustedhosts" >> /etc/opendkim.conf
+grep ^KeyTable /etc/opendkim.conf >/dev/null || echo "KeyTable file:/etc/opendkim/KeyTable
+SigningTable refile:/etc/opendkim/SigningTable
+InternalHosts refile:/etc/opendkim/TrustedHosts" >> /etc/opendkim.conf
 
 # OpenDKIM daemon settings, removing previously activated socket.
-sed -i "/^SOCKET/d" /etc/default/opendkim && echo "SOCKET=\"inet:8891@localhost\"" >> /etc/default/opendkim
+# Debian
+# sed -i "/^SOCKET/d" /etc/default/opendkim && echo "SOCKET=\"inet:8891@localhost\"" >> /etc/default/opendkim
+# CentOS
+sed -i "/^SOCKET/d" /etc/sysconfig/opendkim && echo "SOCKET=\"inet:8891@localhost\"" >> /etc/sysconfig/opendkim
 
 # Here we add to postconf the needed settings for working with OpenDKIM
+# CentOS doesn't like localhost
 echo "Configuring Postfix with OpenDKIM settings..."
+postconf -e "smtpd_milters = inet:127.0.0.1:8891"
+postconf -e "non_smtpd_milters = $smtpd_milters"
 postconf -e "milter_default_action = accept"
-postconf -e "milter_protocol = 2"
-postconf -e "smtpd_milters = inet:localhost:8891"
-postconf -e "non_smtpd_milters = inet:localhost:8891"
+
+groupadd spamd
+sudo useradd -g spamd -s /bin/false -d /var/log/spamassassin spamd
+sudo chown spamd:spamd /var/log/spamassassin
+
 
 
 echo "Restarting Dovecot..."
@@ -201,7 +208,7 @@ service opendkim restart && echo "OpenDKIM restarted."
 echo "Restarting Spam Assassin..."
 service spamassassin restart && echo "Spamassassin restarted."
 
-pval="$(tr -d "\n" </etc/postfix/dkim/mail.txt | sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" | grep -o p=.*)"
+pval="$(tr -d "\n" </etc/opendkim/keys/$subdom.txt | sed "s/k=rsa.* \"p=/k=rsa; p=/;s/\"\s*\"//;s/\"\s*).*//" | grep -o p=.*)"
 echo "Here is your TXT entry:"
 echo
 echo
