@@ -8,7 +8,7 @@
 
 
 # BEFORE YOU RUN THIS
-# - Have a CentOS system with a static IP and all that. Pretty much any default VPS offered by a company will have all the basic stuff you need. This script might run on Ubuntu as well. Haven't tried it.
+# - Have a CentOS system with a static IP and all that. Pretty much any default VPS offered by a company will have all the basic stuff you need.
 # - Have a Let's Encrypt SSL certificate for $maildomain. You might need one for $domain as well, but they're free with Let's Encypt so you should have them anyway.
 # - If you've been toying around with your server settings trying to get postfix/dovecot/etc. working before running this, I recommend you `apt purge` everything first because this script is build on top of only the defaults. Clearr out /etc/postfix and /etc/dovecot yourself if needbe.
 
@@ -16,7 +16,7 @@
 # On installation of Postfix, select "Internet Site" and put in TLD (without before it mail.)
 
 echo "Installing programs..."
-yum install postfix dovecot opendkim spamassassin # TODO where/what is spamc??
+yum install postfix dovecot opendkim spamassassin dovecot-pigeonhole
 domain="$(cat /etc/mailname)"
 subdom="mail"
 maildomain="$subdom.$domain"
@@ -94,7 +94,7 @@ ssl_key = </etc/letsencrypt/live/$maildomain/privkey.pem
 # Plaintext login. This is safe and easy thanks to SSL.
 auth_mechanisms = plain
 
-protocols = \$protocols imap
+protocols = \$protocols imap lmtp
 
 # Search for valid users in /etc/passwd
 userdb {
@@ -138,8 +138,22 @@ service auth {
 	mode = 0660
 	user = postfix
 	group = postfix
+  }
 }
+
+# lmtp local delivery
+service lmtp {
+ unix_listener /var/spool/postfix/private/dovecot-lmtp {
+   mode = 0600
+   user = postfix
+   group = postfix
+  }
 }
+protocol lmtp {
+  postmaster_address = postmaster@$domain
+  mail_plugins = \$mail_plugins sieve
+}
+auth_username_format = %Ln
 " > /etc/dovecot/dovecot.conf
 
 echo "Preparing user authetication..."
